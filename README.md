@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://graph.org/file/4cb6c2fefaf6cbce7897c-037d8d6e8dbb3d9ed8.jpg" width="380" style="border-radius:15px;" alt="Bot Banner">
+  <img src="https://graph.org/file/22fc961a62589b480f0a4-9e9e0a20b323b48234.jpg" width="380" style="border-radius:15px;" alt="Bot Banner">
 </p>
 
 <h1 align="center">🔥 Telegram Button Bot</h1>
@@ -25,7 +25,7 @@
 ## 🖼 Interface Preview
 
 <p align="center">
-  <img src="https://graph.org/file/4cb6c2fefaf6cbce7897c-037d8d6e8dbb3d9ed8.jpg" width="300" style="border-radius:15px;" alt="Bot UI">
+  <img src="https://graph.org/file/22fc961a62589b480f0a4-9e9e0a20b323b48234.jpg" width="300" style="border-radius:15px;" alt="Bot UI">
 </p>
 
 ---
