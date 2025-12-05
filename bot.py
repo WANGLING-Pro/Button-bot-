@@ -2,6 +2,9 @@ import os
 import json
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 
 # ========= CONFIG =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -12,8 +15,8 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 CHANNELS_FILE = "channels.json"
 
-# ========= SIMPLE USER STATE (memory) =========
-# user_states[chat_id] = {"mode": "add_channel" / "create_post", "channel_id": "..."}
+
+# ========= SIMPLE USER STATE =========
 user_states = {}
 
 
@@ -29,37 +32,31 @@ def clear_state(chat_id: int):
     user_states.pop(chat_id, None)
 
 
-# ========= CHANNELS JSON HELPERS =========
+# ========= CHANNELS JSON =========
 
 def load_channels():
     try:
         with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            channels = data.get("channels", [])
-            # ensure correct format
-            clean = []
-            for ch in channels:
-                if isinstance(ch, dict) and "id" in ch and "title" in ch:
-                    clean.append(ch)
-            return clean
-    except FileNotFoundError:
-        return []
-    except Exception:
+            return data.get("channels", [])
+    except:
         return []
 
 
 def save_channels(channels: list[dict]):
     with open(CHANNELS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"channels": channels}, f, ensure_ascii=False, indent=2)
+        json.dump({"channels": channels}, f, indent=2, ensure_ascii=False)
 
 
 def add_channel_to_json(ch_id: int, title: str):
-    ch_id_str = str(ch_id)
     channels = load_channels()
-    for ch in channels:
-        if ch["id"] == ch_id_str:
-            return  # already there
-    channels.append({"id": ch_id_str, "title": title})
+    ch_id = str(ch_id)
+
+    for c in channels:
+        if c["id"] == ch_id:
+            return
+
+    channels.append({"id": ch_id, "title": title})
     save_channels(channels)
 
 
@@ -93,17 +90,12 @@ def main_menu_keyboard():
 
 
 def channels_keyboard():
-    channels = load_channels()
     kb = InlineKeyboardMarkup()
+    channels = load_channels()
 
-    # 2 buttons per row, title text
-    row: list[InlineKeyboardButton] = []
-    for idx, ch in enumerate(channels, start=1):
-        btn = InlineKeyboardButton(
-            ch["title"],
-            callback_data=f"select_channel:{ch['id']}",
-        )
-        row.append(btn)
+    row = []
+    for c in channels:
+        row.append(InlineKeyboardButton(c["title"], callback_data=f"select_channel:{c['id']}"))
         if len(row) == 2:
             kb.row(*row)
             row = []
@@ -122,18 +114,17 @@ def handle_start(message):
     channels = load_channels()
 
     if not channels:
-        # No channels → force add first
-        msg = bot.send_message(
+        bot.send_message(
             chat_id,
             "📌 <b>Please add a channel to continue.</b>",
             reply_markup=add_channel_keyboard(),
         )
         return
 
-    first = message.from_user.first_name or "Friend"
+    name = message.from_user.first_name or "Friend"
     bot.send_message(
         chat_id,
-        f"Hello <b>{first}</b>! 👋\n\n"
+        f"Hello <b>{name}</b>! 👋\n\n"
         "Here you can create rich posts, view stats and accomplish other tasks.\n\n"
         "Choose an option below:",
         reply_markup=main_menu_keyboard(),
@@ -151,62 +142,33 @@ def handle_callback(call):
     bot.answer_callback_query(call.id)
 
     if data == "add_channel":
-        # Purana message delete
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-
+        bot.delete_message(chat_id, msg_id)
         set_state(chat_id, "add_channel")
-
         bot.send_message(
             chat_id,
-            "➡ Add this bot as <b>Admin (full rights)</b> in your channel.\n\n"
-            "➡ Then <b>forward any one message</b> from that channel to me.",
+            "➡ Add the bot as <b>Admin (full rights)</b> in your channel.\n\n"
+            "➡ Then forward <b>any one message</b> from that channel here."
         )
         return
 
     if data == "settings":
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-        bot.send_message(
-            chat_id,
-            "⚙ <b>Settings</b>",
-            reply_markup=settings_keyboard(),
-        )
+        bot.delete_message(chat_id, msg_id)
+        bot.send_message(chat_id, "⚙ <b>Settings</b>", reply_markup=settings_keyboard())
         return
 
     if data == "back_home":
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-        # show main menu (channels must exist already)
-        bot.send_message(
-            chat_id,
-            "🏠 Main menu:",
-            reply_markup=main_menu_keyboard(),
-        )
+        bot.delete_message(chat_id, msg_id)
         clear_state(chat_id)
+        bot.send_message(chat_id, "🏠 Main menu:", reply_markup=main_menu_keyboard())
         return
 
     if data == "create_post":
         channels = load_channels()
         if not channels:
-            bot.send_message(
-                chat_id,
-                "❌ No channel added yet.",
-                reply_markup=add_channel_keyboard(),
-            )
+            bot.send_message(chat_id, "❌ No channels yet!", reply_markup=add_channel_keyboard())
             return
 
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-
+        bot.delete_message(chat_id, msg_id)
         bot.send_message(
             chat_id,
             "📌 <b>Select a channel to create a new post:</b>",
@@ -215,198 +177,105 @@ def handle_callback(call):
         return
 
     if data.startswith("select_channel:"):
-        # user chose one channel
         channel_id = data.split(":", 1)[1]
-
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-
-        set_state(chat_id, "create_post", channel_id=channel_id)
-
-        bot.send_message(
-            chat_id,
-            "📝 <b>Send the post content now:</b>\n"
-            "You can send text, photo, video, document, etc.",
-        )
+        bot.delete_message(chat_id, msg_id)
+        set_state(chat_id, "create_post", channel_id)
+        bot.send_message(chat_id, "📝 <b>Send your post content now.</b>")
         return
 
-    if data == "scheduled_posts":
-        bot.send_message(chat_id, "⏰ Scheduled posts → coming soon!")
-        return
-
-    if data == "edit_post":
-        bot.send_message(chat_id, "✏ Edit Post → coming soon!")
-        return
-
-    if data == "channel_stats":
-        bot.send_message(chat_id, "📊 Channel stats → coming soon!")
+    # Coming soon buttons
+    if data in ["scheduled_posts", "edit_post", "channel_stats"]:
+        bot.send_message(chat_id, "⏳ Coming soon!")
         return
 
 
 # ========= MESSAGE HANDLER =========
 
-@bot.message_handler(
-    content_types=[
-        "text",
-        "photo",
-        "video",
-        "document",
-        "animation",
-        "audio",
-        "voice",
-        "video_note",
-        "sticker",
-    ]
-)
+@bot.message_handler(content_types=[
+    "text", "photo", "video", "document", "animation",
+    "audio", "voice", "video_note", "sticker"
+])
 def handle_messages(message):
     chat_id = message.chat.id
     state = get_state(chat_id)
 
-    # 1) User is adding channel via forward
+    # Add Channel
     if state and state["mode"] == "add_channel":
         if message.forward_from_chat and message.forward_from_chat.type == "channel":
             ch = message.forward_from_chat
             add_channel_to_json(ch.id, ch.title or str(ch.id))
 
             clear_state(chat_id)
-
             bot.send_message(
                 chat_id,
-                f"✅ Channel <b>{ch.title or ch.id}</b> added successfully!",
+                f"✅ Channel <b>{ch.title or ch.id}</b> added!",
                 reply_markup=main_menu_keyboard(),
             )
-            return
         else:
-            bot.send_message(
-                chat_id,
-                "❌ Please forward a <b>message from a channel</b> only.",
-            )
-            return
+            bot.send_message(chat_id, "❌ Please forward a valid channel message.")
+        return
 
-    # 2) User is sending content for Create Post
+    # Create Post
     if state and state["mode"] == "create_post":
-        channel_id = state["channel_id"]
-        sent = False
-
+        ch_id = state["channel_id"]
         try:
             if message.content_type == "text":
-                bot.send_message(channel_id, message.text)
-                sent = True
+                bot.send_message(ch_id, message.text, parse_mode="HTML")
 
             elif message.content_type == "photo":
-                file_id = message.photo[-1].file_id
-                bot.send_photo(
-                    channel_id,
-                    file_id,
-                    caption=message.caption,
-                )
-                sent = True
+                bot.send_photo(ch_id, message.photo[-1].file_id, caption=message.caption)
 
             elif message.content_type == "video":
-                bot.send_video(
-                    channel_id,
-                    message.video.file_id,
-                    caption=message.caption,
-                )
-                sent = True
+                bot.send_video(ch_id, message.video.file_id, caption=message.caption)
 
             elif message.content_type == "document":
-                bot.send_document(
-                    channel_id,
-                    message.document.file_id,
-                    caption=message.caption,
-                )
-                sent = True
+                bot.send_document(ch_id, message.document.file_id, caption=message.caption)
 
             elif message.content_type == "animation":
-                bot.send_animation(
-                    channel_id,
-                    message.animation.file_id,
-                    caption=message.caption,
-                )
-                sent = True
+                bot.send_animation(ch_id, message.animation.file_id, caption=message.caption)
 
             elif message.content_type == "audio":
-                bot.send_audio(
-                    channel_id,
-                    message.audio.file_id,
-                    caption=message.caption,
-                )
-                sent = True
+                bot.send_audio(ch_id, message.audio.file_id, caption=message.caption)
 
             elif message.content_type == "voice":
-                bot.send_voice(
-                    channel_id,
-                    message.voice.file_id,
-                )
-                sent = True
+                bot.send_voice(ch_id, message.voice.file_id)
 
             elif message.content_type == "video_note":
-                bot.send_video_note(
-                    channel_id,
-                    message.video_note.file_id,
-                )
-                sent = True
+                bot.send_video_note(ch_id, message.video_note.file_id)
 
             elif message.content_type == "sticker":
-                bot.send_sticker(
-                    channel_id,
-                    message.sticker.file_id,
-                )
-                sent = True
+                bot.send_sticker(ch_id, message.sticker.file_id)
+
+            bot.send_message(chat_id, "✅ Post sent successfully!")
 
         except Exception as e:
-            bot.send_message(
-                chat_id,
-                f"⚠️ Failed to send message to channel.\n<code>{e}</code>",
-            )
-
-        if sent:
-            bot.send_message(chat_id, "✅ Post sent successfully!")
-        else:
-            bot.send_message(
-                chat_id,
-                "❌ This message type is not supported yet.",
-            )
+            bot.send_message(chat_id, f"⚠️ Failed:\n<code>{e}</code>")
 
         clear_state(chat_id)
         return
 
-    # 3) Normal messages (no active state)
-    # yaha tum kuch default behavior rakh sakte ho, abhi ignore kar dete hain
-    # bot.send_message(chat_id, "Use /start to use the menu.")
-    return
 
+# ========= DUMMY WEB SERVER (RENDER FIX) =========
 
-# ========= RUN =========
-
-if __name__ == "__main__":
-    print("Bot started with polling...")
-    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
-
-
-import threading
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-# Dummy web server for Render (so it detects an open port)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot running")
+        self.wfile.write(b"Bot running!")
+
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    httpd = HTTPServer(("0.0.0.0", port), Handler)
     print(f"Server running on port {port}")
-    server.serve_forever()
+    httpd.serve_forever()
 
-# Start web server in background thread
+
 threading.Thread(target=run_server).start()
 
-# Start Telegram bot polling
-bot.polling()
+
+# ========= START BOT =========
+
+print("Bot started with polling...")
+bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
