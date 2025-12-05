@@ -385,3 +385,28 @@ def handle_messages(message):
 if __name__ == "__main__":
     print("Bot started with polling...")
     bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+
+
+import threading
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Dummy web server for Render (so it detects an open port)
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot running")
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"Server running on port {port}")
+    server.serve_forever()
+
+# Start web server in background thread
+threading.Thread(target=run_server).start()
+
+# Start Telegram bot polling
+bot.polling()
