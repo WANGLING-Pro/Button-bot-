@@ -1,174 +1,30 @@
 import os
-import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ========= CONFIG =========
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is not set!")
+from config import BOT_TOKEN
+from storage import load_channels, add_channel, remove_channel, get_channel
+from keyboards import (
+    add_channel_keyboard,
+    main_menu_keyboard,
+    settings_keyboard,
+    channels_keyboard,
+    delete_channels_keyboard,
+    post_builder_keyboard,
+)
+from states import (
+    MODE_ADD_CHANNEL,
+    MODE_COLLECT_POST,
+    MODE_ADD_URL_BUTTON,
+    set_state,
+    get_state,
+    clear_state,
+)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-CHANNELS_FILE = "channels.json"
-
-# user_states[chat_id] = {
-#   "mode": "add_channel" / "collect_post",
-#   "channel_id": "...",
-#   "panel_id": int,
-#   "buffer": [message_id, ...]
-# }
-user_states = {}
-
-
-# ========= STATE HELPERS =========
-def set_state(chat_id, mode, channel_id=None, panel_id=None, buffer=None):
-    if buffer is None:
-        buffer = []
-    user_states[chat_id] = {
-        "mode": mode,
-        "channel_id": channel_id,
-        "panel_id": panel_id,
-        "buffer": buffer,
-    }
-
-
-def get_state(chat_id):
-    return user_states.get(chat_id)
-
-
-def clear_state(chat_id):
-    user_states.pop(chat_id, None)
-
-
-# ========= CHANNEL JSON HELPERS =========
-def load_channels():
-    try:
-        with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            channels = data.get("channels", [])
-            clean = []
-            for ch in channels:
-                if isinstance(ch, dict) and "id" in ch and "title" in ch:
-                    clean.append(ch)
-            return clean
-    except Exception:
-        return []
-
-
-def save_channels(channels):
-    with open(CHANNELS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"channels": channels}, f, indent=2, ensure_ascii=False)
-
-
-def add_channel(ch_id, title):
-    ch_id = str(ch_id)
-    channels = load_channels()
-    for ch in channels:
-        if ch["id"] == ch_id:
-            return
-    channels.append({"id": ch_id, "title": title})
-    save_channels(channels)
-
-
-def remove_channel(ch_id):
-    ch_id = str(ch_id)
-    channels = load_channels()
-    new_list = [ch for ch in channels if ch["id"] != ch_id]
-    save_channels(new_list)
-
-
-def get_channel(ch_id):
-    ch_id = str(ch_id)
-    for ch in load_channels():
-        if ch["id"] == ch_id:
-            return ch
-    return None
-
-
-# ========= KEYBOARDS =========
-def add_channel_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("+ Add Channel", callback_data="add_channel"))
-    return kb
-
-
-def main_menu_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("Create Post", callback_data="create_post"))
-    kb.row(
-        InlineKeyboardButton("Scheduled Posts", callback_data="scheduled_posts"),
-        InlineKeyboardButton("Edit Post", callback_data="edit_post"),
-    )
-    kb.row(
-        InlineKeyboardButton("Channel Stats", callback_data="channel_stats"),
-        InlineKeyboardButton("Settings", callback_data="settings"),
-    )
-    return kb
-
-
-def settings_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.row(
-        InlineKeyboardButton("➕ Add Channel", callback_data="add_channel"),
-        InlineKeyboardButton("🗑 Delete Channel", callback_data="delete_channel"),
-    )
-    kb.row(InlineKeyboardButton("« Back", callback_data="back_home"))
-    return kb
-
-
-def channels_keyboard():
-    kb = InlineKeyboardMarkup()
-    channels = load_channels()
-    row = []
-    for ch in channels:
-        row.append(
-            InlineKeyboardButton(
-                ch["title"], callback_data=f"select_channel:{ch['id']}"
-            )
-        )
-        if len(row) == 2:
-            kb.row(*row)
-            row = []
-    if row:
-        kb.row(*row)
-    kb.row(InlineKeyboardButton("« Back", callback_data="back_home"))
-    return kb
-
-
-def delete_channels_keyboard():
-    kb = InlineKeyboardMarkup()
-    channels = load_channels()
-    row = []
-    for ch in channels:
-        row.append(
-            InlineKeyboardButton(
-                ch["title"], callback_data=f"remove_channel:{ch['id']}"
-            )
-        )
-        if len(row) == 2:
-            kb.row(*row)
-            row = []
-    if row:
-        kb.row(*row)
-    kb.row(InlineKeyboardButton("« Back", callback_data="settings"))
-    return kb
-
-
-def post_builder_keyboard():
-    kb = InlineKeyboardMarkup()
-    kb.row(InlineKeyboardButton("Attach Media", callback_data="attach_media"))
-    kb.row(InlineKeyboardButton("Add URL Buttons", callback_data="add_url_buttons"))
-    kb.row(InlineKeyboardButton("Delete Message", callback_data="delete_last_msg"))
-    kb.row(InlineKeyboardButton("↓ Show Actions", callback_data="show_actions"))
-    kb.row(
-        InlineKeyboardButton("Delete All", callback_data="delete_all"),
-        InlineKeyboardButton("Preview", callback_data="preview_post"),
-        InlineKeyboardButton("Send", callback_data="send_post"),
-    )
-    return kb
 
 
 # ========= /start =========
@@ -194,7 +50,7 @@ def handle_start(message):
 
     sent = bot.send_message(chat_id, text, reply_markup=kb)
     clear_state(chat_id)
-    # we don't strictly need panel_id here, callbacks ke time mil jayega
+    # panel_id = sent.message_id if ever needed
 
 
 # ========= CALLBACKS =========
@@ -206,7 +62,9 @@ def handle_callback(call):
 
     bot.answer_callback_query(call.id)
 
-    # ---- Add Channel ----
+    state = get_state(chat_id)
+
+    # ----- Add Channel start -----
     if data == "add_channel":
         bot.edit_message_text(
             "➡ Add this bot as <b>Admin (full rights)</b> in your channel.\n\n"
@@ -214,10 +72,10 @@ def handle_callback(call):
             chat_id,
             msg_id,
         )
-        set_state(chat_id, "add_channel", panel_id=msg_id)
+        set_state(chat_id, MODE_ADD_CHANNEL, panel_id=msg_id)
         return
 
-    # ---- Settings ----
+    # ----- Settings -----
     if data == "settings":
         bot.edit_message_text(
             "⚙ <b>Settings</b>\nManage your connected channels:",
@@ -232,8 +90,7 @@ def handle_callback(call):
         channels = load_channels()
         if not channels:
             bot.edit_message_text(
-                "❌ No channels to delete.\n\n"
-                "Use <b>Add Channel</b> to connect one.",
+                "❌ No channels to delete.\n\nUse <b>Add Channel</b> first.",
                 chat_id,
                 msg_id,
                 reply_markup=settings_keyboard(),
@@ -256,16 +113,15 @@ def handle_callback(call):
         channels = load_channels()
         if not channels:
             bot.edit_message_text(
-                f"✅ Channel removed.\n\n"
-                "No channels left. Please add a new channel to continue.",
+                "✅ Channel removed.\n\nNo channels left, please add a new channel.",
                 chat_id,
                 msg_id,
                 reply_markup=add_channel_keyboard(),
             )
         else:
+            title = ch["title"] if ch else ch_id
             bot.edit_message_text(
-                f"✅ Channel <b>{ch['title'] if ch else ch_id}</b> removed.\n\n"
-                "You can manage more channels below:",
+                f"✅ Channel <b>{title}</b> removed.\n\nMore options:",
                 chat_id,
                 msg_id,
                 reply_markup=settings_keyboard(),
@@ -273,7 +129,7 @@ def handle_callback(call):
         clear_state(chat_id)
         return
 
-    # ---- Back to Home ----
+    # ----- Back to home -----
     if data == "back_home":
         channels = load_channels()
         if not channels:
@@ -293,13 +149,12 @@ def handle_callback(call):
         clear_state(chat_id)
         return
 
-    # ---- Create Post ----
+    # ----- Create Post flow -----
     if data == "create_post":
         channels = load_channels()
         if not channels:
             bot.edit_message_text(
-                "❌ No channels added yet.\n\n"
-                "Please add a channel first.",
+                "❌ No channels yet.\n\nPlease add a channel first.",
                 chat_id,
                 msg_id,
                 reply_markup=add_channel_keyboard(),
@@ -325,6 +180,7 @@ def handle_callback(call):
             "Send me one or multiple messages you want to include in the post.\n"
             "It can be anything — a text, photo, video, even a sticker."
         )
+
         bot.edit_message_text(
             text,
             chat_id,
@@ -332,58 +188,109 @@ def handle_callback(call):
             reply_markup=post_builder_keyboard(),
         )
 
-        set_state(chat_id, "collect_post", channel_id=channel_id, panel_id=msg_id, buffer=[])
-        return
-
-    # ---- Post Builder Buttons ----
-    state = get_state(chat_id)
-
-    if data in ["attach_media", "add_url_buttons", "delete_last_msg", "show_actions"]:
-        # Abhi ke liye sirf help text
-        bot.answer_callback_query(
-            call.id,
-            "Just send messages below. They will be part of the post.",
-            show_alert=False,
+        set_state(
+            chat_id,
+            MODE_COLLECT_POST,
+            channel_id=channel_id,
+            panel_id=msg_id,
+            buffer=[],
+            buttons=[],
         )
         return
 
+    # ===== POST BUILDER BUTTONS =====
+    state = get_state(chat_id)
+
+    if data == "attach_media":
+        bot.answer_callback_query(
+            call.id, "Just send media/messages below. They will be added.", show_alert=False
+        )
+        return
+
+    if data == "add_url_buttons":
+        if not state or state["mode"] != MODE_COLLECT_POST:
+            bot.answer_callback_query(call.id, "No active post.", show_alert=True)
+            return
+        bot.answer_callback_query(
+            call.id,
+            "Send button in this format:\n\nButton text | https://example.com",
+            show_alert=True,
+        )
+        set_state(
+            chat_id,
+            MODE_ADD_URL_BUTTON,
+            channel_id=state["channel_id"],
+            panel_id=state["panel_id"],
+            buffer=state["buffer"],
+            buttons=state["buttons"],
+        )
+        return
+
+    if data == "delete_last_msg":
+        if not state or state["mode"] not in [MODE_COLLECT_POST, MODE_ADD_URL_BUTTON]:
+            return
+        if not state["buffer"]:
+            bot.answer_callback_query(call.id, "No messages to delete.", show_alert=False)
+            return
+        last_id = state["buffer"].pop()
+        try:
+            bot.delete_message(chat_id, last_id)
+        except Exception:
+            pass
+        bot.answer_callback_query(call.id, "Last message removed.", show_alert=False)
+        return
+
     if data == "delete_all":
-        if state and state["mode"] == "collect_post":
-            state["buffer"] = []
-            bot.answer_callback_query(call.id, "Cleared all collected messages.")
+        if not state or state["mode"] not in [MODE_COLLECT_POST, MODE_ADD_URL_BUTTON]:
+            return
+        for mid in state["buffer"]:
+            try:
+                bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
+        state["buffer"].clear()
+        bot.answer_callback_query(call.id, "All messages cleared.", show_alert=False)
         return
 
     if data == "preview_post":
-        if not state or state["mode"] != "collect_post":
-            bot.answer_callback_query(call.id, "Nothing to preview.", show_alert=False)
+        if not state or state["mode"] not in [MODE_COLLECT_POST, MODE_ADD_URL_BUTTON]:
+            bot.answer_callback_query(call.id, "Nothing to preview.", show_alert=True)
             return
-
         count = len(state["buffer"])
+        btn_count = len(state["buttons"])
         bot.answer_callback_query(
             call.id,
-            f"You have {count} message(s) in this post.",
+            f"Preview:\nMessages: {count}\nButtons: {btn_count}",
             show_alert=True,
         )
         return
 
     if data == "send_post":
-        if not state or state["mode"] != "collect_post":
+        if not state or state["mode"] not in [MODE_COLLECT_POST, MODE_ADD_URL_BUTTON]:
             bot.answer_callback_query(call.id, "No post to send.", show_alert=True)
             return
 
         channel_id = state["channel_id"]
         buffer = state["buffer"]
+        buttons = state["buttons"]
 
-        if not buffer:
-            bot.answer_callback_query(call.id, "You haven't sent any message.", show_alert=True)
+        if not buffer and not buttons:
+            bot.answer_callback_query(call.id, "Post is empty.", show_alert=True)
             return
 
-        # Copy all collected messages to the channel
+        # 1) copy messages to channel
         for mid in buffer:
             try:
                 bot.copy_message(channel_id, chat_id, mid)
             except Exception as e:
                 print("Copy error:", e)
+
+        # 2) if URL buttons hain → ek extra message with inline keyboard
+        if buttons:
+            kb = InlineKeyboardMarkup()
+            for b in buttons:
+                kb.add(InlineKeyboardButton(b["text"], url=b["url"]))
+            bot.send_message(channel_id, "🔗 Buttons:", reply_markup=kb)
 
         bot.edit_message_text(
             "✅ Post sent successfully!\n\nBack to main menu:",
@@ -394,7 +301,15 @@ def handle_callback(call):
         clear_state(chat_id)
         return
 
-    # ---- Other menu buttons (placeholders) ----
+    if data == "show_actions":
+        bot.answer_callback_query(
+            call.id,
+            "Use Delete All / Preview / Send below.",
+            show_alert=False,
+        )
+        return
+
+    # place-holders
     if data in ["scheduled_posts", "edit_post", "channel_stats"]:
         bot.answer_callback_query(call.id, "Coming soon…", show_alert=False)
         return
@@ -418,13 +333,12 @@ def handle_messages(message):
     chat_id = message.chat.id
     state = get_state(chat_id)
 
-    # ---- Add Channel flow ----
-    if state and state["mode"] == "add_channel":
+    # ---- Add Channel ----
+    if state and state["mode"] == MODE_ADD_CHANNEL:
         if message.forward_from_chat and message.forward_from_chat.type == "channel":
             ch = message.forward_from_chat
             add_channel(ch.id, ch.title or str(ch.id))
 
-            # Panel ko main menu me change karo
             try:
                 bot.edit_message_text(
                     f"✅ Channel <b>{ch.title or ch.id}</b> added successfully!\n\n"
@@ -448,11 +362,39 @@ def handle_messages(message):
             )
         return
 
-    # ---- Collect post content ----
-    if state and state["mode"] == "collect_post":
-        # Sirf collect, kuch send nahi karte abhi
+    # ---- URL Button input ----
+    if state and state["mode"] == MODE_ADD_URL_BUTTON:
+        text = message.text or ""
+        if "|" not in text:
+            bot.send_message(
+                chat_id,
+                "❌ Wrong format.\nUse: <code>Button text | https://example.com</code>",
+            )
+            return
+        label, url = [x.strip() for x in text.split("|", 1)]
+        if not label or not url:
+            bot.send_message(chat_id, "❌ Text or URL missing.")
+            return
+
+        state["buttons"].append({"text": label, "url": url})
+        # back to collect mode
+        set_state(
+            chat_id,
+            MODE_COLLECT_POST,
+            channel_id=state["channel_id"],
+            panel_id=state["panel_id"],
+            buffer=state["buffer"],
+            buttons=state["buttons"],
+        )
+        bot.send_message(
+            chat_id,
+            f"✅ Button added: <b>{label}</b>\nNow continue sending post content.",
+        )
+        return
+
+    # ---- Collect post messages ----
+    if state and state["mode"] == MODE_COLLECT_POST:
         state["buffer"].append(message.message_id)
-        # thoda feedback de sakte ho:
         bot.send_message(
             chat_id,
             f"✅ Saved ({len(state['buffer'])}) message(s) for this post.\n"
@@ -460,8 +402,8 @@ def handle_messages(message):
         )
         return
 
-    # No active state → ignore / or help
-    # bot.send_message(chat_id, "Use /start to open the menu.")
+    # else: ignore / help
+    # bot.send_message(chat_id, "Use /start to open menu.")
     return
 
 
@@ -481,7 +423,6 @@ def run_server():
     server.serve_forever()
 
 
-# ========= START =========
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     print("Bot started with polling...")
